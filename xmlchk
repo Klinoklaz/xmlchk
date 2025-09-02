@@ -1,0 +1,144 @@
+#!/usr/bin/env -S gawk -f
+
+BEGIN {
+    FS = "<"
+    # push when encounter an start tag,
+    # pop when encounter an end tag
+    t_top = 0
+    tag_stack[t_top] = ""
+    # track syntax structures that can cross multiple lines
+    c_top = 0
+    context_stack[c_top] = "d" # doc
+}
+
+{
+    # TODO:
+}
+
+function error(msg, pos) {
+    print msg " at line " NR ", char " pos > "/dev/stderr"
+    exit 1
+}
+
+# detect comment end, check '--' inside comment,
+# then remove comment from field
+function check_comment(i, start) {
+    # not inside a comment
+    if (context_stack[c_top] != "c") {
+        return 0
+    }
+    # inside a comment
+    if ((n = index("--", $i)) == 0) {
+        return -1
+    }
+    m = index("-->", $i)
+    if (m == 0 || n < m) {
+        error("illegal '--' inside comment", n + start)
+    }
+    # end of a comment
+    $i = substr($i, m + 3)
+    delete context_stack[c_top--]
+    return m + 2 # trimmed length
+}
+
+# check end tag, 2 errors to be considered:
+# 1. mismatch with a start tag,
+# 2. the tag crossed multiple lines and one of them contains non-space
+function check_etag(i, line_start, start) {
+    if (context_stack[c_top] != "e") {
+        return 0
+    }
+    if (n = index(">", $i)) {
+        tag = substr($i, 1, n - 1)
+        $i = substr($i, n + 1)
+        delete context_stack[c_top--]
+    } else {
+        tag = $i
+    }
+    gsub(/\s*$/, "", tag)
+    # line_start == is multi-line && not the initial line
+    if (line_start && tag != "") {
+        error("malformed end tag", start)
+    } else if (! line_start) {
+        if (tag != tag_stack[t_top]) {
+            msg = sprintf("mismatch: <%s> </%s>", tag_stack[t_top], tag)
+            error(msg, start)
+        }
+        delete tag_stack[t_top--]
+    }
+    return n ? n : -1
+}
+
+# check for illegal '&' and ']]>' inside char data
+function check_text(i, start) {
+    if (context_stack[c_top] != "t") {
+        return 0
+    }
+    if ((n = index("]]>", $i))) {
+        error("CDATA end delimiter inside text", start + n)
+    }
+    n = split($i, arr, "&")
+    pos = length(arr[1])
+    for (i = 2; i <= n; i++) {
+        if (arr[i] !~ /^#[0-9]+;/ &&
+            arr[i] !~ /^#x[0-9a-fA-F]+;/ &&
+            arr[i] !~ /^[^& :0-9][^& ]*;/) {
+            error("bad reference", start + pos)
+        }
+        pos += length(arr[i]) + 1
+    }
+    return -1
+}
+
+# skip PI/prolog
+function skip_pi(i, line_start, start) {
+    if (context_stack[c_top] != "?") {
+        return 0
+    }
+    if (show_igr) {
+        if (start) {
+            printf "line %d, char %d: <%s", NR, start, $i
+        } else if (line_start) {
+            printf "line %d: %s", NR, $i
+        } else {
+            printf "<%s", $i
+        }
+    }
+    if ((n = index("?>", $i)) == 0) {
+        return -1
+    }
+    $i = substr($i, n + 2)
+    delete context_stack[c_top--]
+    return n + 1 # trimmed length
+}
+
+# skip DTD/CDATA
+function skip_dtd(i, line_start, start) {
+    # note that DTD can have comments in its interior
+    if (context_stack[c_top] != "!" || (! line_start && $i ~ /^!--/)) {
+        return 0
+    }
+    if (show_igr) {
+        if (start) {
+            printf "line %d, char %d: <%s", NR, start, $i
+        } else if (line_start) {
+            printf "line %d: %s", NR, $i
+        } else {
+            printf "<%s", $i
+        }
+    }
+    if (! line_start) {
+        context_stack[++c_top] = "!"
+    }
+    # get out of DTD's nested sub-structures
+    skipped = 0
+    while ((n = index(">", $i)) && context_stack[c_top] == "!") {
+        skipped += n
+        $i = substr($i, n + 1)
+        delete context_stack[c_top--]
+    }
+    if (context_stack[c_top] == "!") {
+        return -1
+    }
+    return skipped # trimmed length
+}
