@@ -2,7 +2,7 @@
 
 BEGIN {
     FS = "<"
-    # push when encounter an start tag,
+    # push when encounter a start tag,
     # pop when encounter an end tag
     t_top = 0
     tag_stack[t_top] = ""
@@ -18,6 +18,30 @@ BEGIN {
 function error(msg, pos) {
     print msg " at line " NR ", char " pos > "/dev/stderr"
     exit 1
+}
+
+# find invald character in name.
+# didn't cover the full range because unicode sequences are troublesome in awk.
+# see https://www.w3.org/TR/xml/#NT-Name
+function invalid_name(name) {
+    if (name ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/) {
+        return 1
+    }
+    return match(name, /[\x00-\x2C\x2F\x3A-\x40\x5B-\x5E\x60\x7B-\x7F]/)
+}
+
+# find invald character in reference name.
+# assume the delimiter '&' is already trimmed
+function invalid_ref(ref) {
+    # character ref
+    if (ref ~ /^#[0-9]+;/ || ref ~ /^#x[0-9a-fA-F]+;/) {
+        return 0
+    }
+    # entity ref
+    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! index(";", ref)) {
+        return 1
+    }
+    return match(ref, /[\x00-\x2C\x2F\x3A\x3C-\x40\x5B-\x5E\x60\x7B-\x7F].*?;/)
 }
 
 # detect comment end, check '--' inside comment,
@@ -60,6 +84,9 @@ function check_etag(i, line_start, start) {
     if (line_start && tag != "") {
         error("malformed end tag", start)
     } else if (! line_start) {
+        if (t_top < 1) {
+            error("end tag doesn't match any start tag", start)
+        }
         if (tag != tag_stack[t_top]) {
             msg = sprintf("mismatch: <%s> </%s>", tag_stack[t_top], tag)
             error(msg, start)
@@ -69,25 +96,118 @@ function check_etag(i, line_start, start) {
     return n ? n : -1
 }
 
+# check start tag
+function check_stag(i, start) {
+    if (context_stack[c_top] != "s") {
+        return 0
+    }
+    # note empty-element tags end with '/>'
+    tag = match($i, /\s|>|\/>/) ? substr($i, 1, RSTART - 1) : $i
+    if (tag == "") {
+        error("malformed start tag", start)
+    }
+    if (m = invalid_name(tag)) {
+        error("illegal character in tag name", start + m - 1)
+    }
+    tag_stack[++t_top] = tag
+
+    # deal with attributes
+    trimmed = length(tag)
+    $i = substr($i, trimmed + 1)
+    while (n = match($i, /[^\s]/)) {
+        # consume token: trim leading space, check token, remove token from $i
+        trimmed += n - 1
+        $i = substr($i, n)
+        if (context_stack[c_top] == "s") {
+            # get out from current tag
+            if ($i ~ /^>/) {
+                context_stack[c_top] = "t"
+                $i = substr($i, 2)
+                return ++trimmed
+            }
+            if ($i ~ /^\/>/) {
+                delete context_stack[c_top--]
+                $i = substr($i, 3)
+                return trimmed + 2
+            }
+            # encountered attr name
+            context_stack[++c_top] = "a"
+        }
+        # extract attr name
+        if (context_stack[c_top] == "a") {
+            att_name = match($i, /[\s=]/) ? substr($i, 1, RSTART - 1) : $i
+            if (att_name == "") {
+                error("malformed attribute", start + trimmed)
+            }
+            if (m = invalid_name(att_name)) {
+                error("illegal character in attribute name", start + trimmed + m - 1)
+            }
+            t = length(att_name) + 1
+            trimmed += t
+            $i = substr($i, t + 1)
+            context_stack[c_top] = "l" # now at left side of '='
+        }
+        # wait for an '='
+        if (context_stack[c_top] == "l") {
+            if ($i !~ /^=/) {
+                error("expecting '=' after attribute name", start + trimmed)
+            }
+            trimmed++
+            $i = substr($i, 2)
+            context_stack[c_top] = "r" # now at right side of '='
+        }
+        # wait for a quote
+        if (context_stack[c_top] == "r") {
+            if ($i !~ /^["']/) {
+                error("unquoted attribute value", start + trimmed)
+            }
+            context_stack[c_top] = substr($i, 1, 1) # inside attr value
+            trimmed++
+            $i = substr($i, 2)
+        }
+        # extract attr value
+        if (context_stack[c_top] == "'" || context_stack[c_top] == "\"") {
+            delimiter = context_stack[c_top]
+            if (t = index(delimiter, $i)) {
+                val = substr($i, 1, t - 1)
+                delete context_stack[c_top--]
+            } else {
+                val = $i
+                t = length($i)
+            }
+            check_ref(val, start + trimmed)
+            trimmed += t
+            $i = substr($i, t + 1)
+            if ($i !~ /^(\s|>|\/>|$)/) {
+                error("attribute list not separated by space", start + trimmed)
+            }
+        }
+    }
+    return -1
+}
+
 # check for illegal '&' and ']]>' inside char data
 function check_text(i, start) {
     if (context_stack[c_top] != "t") {
         return 0
     }
     if ((n = index("]]>", $i))) {
-        error("CDATA end delimiter inside text", start + n)
+        error("CDATA end delimiter inside text", start + n - 1)
     }
-    n = split($i, arr, "&")
+    check_ref($i, start)
+    return -1
+}
+
+# check for invalid '&' in char data or attr value
+function check_ref(data, start) {
+    n = split(data, arr, "&")
     pos = length(arr[1])
     for (i = 2; i <= n; i++) {
-        if (arr[i] !~ /^#[0-9]+;/ &&
-            arr[i] !~ /^#x[0-9a-fA-F]+;/ &&
-            arr[i] !~ /^[^& :0-9][^& ]*;/) {
-            error("bad reference", start + pos)
+        if (m = invalid_ref(arr[i])) {
+            error("bad reference", start + pos + m - 1)
         }
         pos += length(arr[i]) + 1
     }
-    return -1
 }
 
 # skip PI/prolog
