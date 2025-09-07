@@ -15,7 +15,57 @@ BEGIN {
 }
 
 {
-    # TODO:
+    original_record = $0
+    start = next_token(1, 1) # left side of '<'
+
+    for (j = 2; j <= NF; j++) {
+        ctx = context_stack[c_top]
+        # unknown bug: iteration index variable can be modified
+        # if passed directly to the following functions
+        i = j
+        # '<' is a valid character in comment/PI,
+        # so both can cross multiple fields
+        if (ctx == "c" || ctx == "?") {
+            start = next_token(i, start)
+            continue
+        }
+        # DTD can have comments in its interior,
+        # if it's not a comment, then assume it's DTD subset
+        if (ctx == "!" && $i !~ /^!--/) {
+            start = push_context("!", i, start)
+            continue
+        }
+        # now at right side of the delimiter '<'
+        if (ctx != "t" && ctx != "d") {
+            error("unexpected '<' inside another tag", start - 1)
+        }
+        switch ($i) {
+        case /^!--/:
+            # trim leading '!--'
+            # to avoid interfering with check_comment()
+            $i = substr($i, 4)
+            start = push_context("c", i, start + 3)
+            continue
+        case /^!/:
+            start = push_context("!", i, start)
+            continue
+        case /^?/:
+            # same logic as '!--'
+            $i = substr($i, 2)
+            start = push_context("?", i, start + 1)
+            continue
+        case /^\//:
+            # check_end_tag() assumes leading '/' is trimmed
+            $i = substr($i, 2)
+            start = push_context("e", i, start + 1, 1)
+            continue
+        default:
+            # unknown bug: this can cause `i` being modified
+            # after the function returns (GNU Awk 5.2.1)
+            start = push_context("s", i, start)
+            continue
+        }
+    }
 }
 
 # extract syntax structures from beginning of field `i` according to context,
@@ -54,6 +104,8 @@ function next_token(i, start) {
             error("text outside the root element", start)
         }
         return start + length($i) + 1
+    default:
+        error("invalid context: "context_stack[c_top], start)
     }
 }
 
@@ -79,7 +131,7 @@ function pop_context(i, start) {
 function push_tag(tag, start) {
     tag_stack[++t_top] = tag
     tag_begin_at[t_top][1] = NR
-    tag_begin_at[t_top][2] = start
+    tag_begin_at[t_top][2] = start - 1 # position of '<'
 }
 
 function pop_tag(no_check, tag, start) {
@@ -87,7 +139,7 @@ function pop_tag(no_check, tag, start) {
         error("end tag doesn't match any start tag", start)
     }
     if (! no_check && tag != tag_stack[t_top]) {
-        error(sprintf("<%s> at line %d, char %d mismatch with </%s>",
+        error(sprintf("<%s> at line %d, char %d mismatches with </%s>",
             tag_stack[t_top], tag_begin_at[t_top][1], tag_begin_at[t_top][2], tag), start)
     }
     delete tag_stack[t_top]
@@ -121,7 +173,7 @@ function invalid_ref(ref) {
         return 0
     }
     # entity ref
-    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! index(";", ref)) {
+    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! index(ref, ";")) {
         return 1
     }
     return match(ref, /[\x00-\x2C\x2F\x3A\x3C-\x40\x5B-\x5E\x60\x7B-\x7F].*?;/)
@@ -129,10 +181,10 @@ function invalid_ref(ref) {
 
 function check_comment(i, start) {
     # can't get out yet, continue with next field or line
-    if (! (n = index("--", $i))) {
+    if (! (n = index($i, "--"))) {
         return start + length($i) + 1
     }
-    cmt_end = index("-->", $i)
+    cmt_end = index($i, "-->")
     # note '---->' is invalid but '--->' is fine
     if (! cmt_end || n < cmt_end - 1) {
         error("illegal '--' inside comment", start + n - 1)
@@ -145,7 +197,7 @@ function check_start_tag(i, start) {
     # note empty-element tags end with '/>'
     if (match($i, /\s|>|\/>/)) {
         tag = substr($i, 1, RSTART - 1)
-        trim_len = RSTART
+        trim_len = RSTART - 1
     } else {
         tag = $i
         trim_len = length($i)
@@ -187,7 +239,7 @@ function check_att_name(i, start) {
     # assume no leading space
     if (match($i, /\s|=/)) {
         att_name = substr($i, 1, RSTART - 1)
-        trim_len = RSTART
+        trim_len = RSTART - 1
     } else {
         att_name = $i
         trim_len = length($i)
@@ -238,7 +290,7 @@ function check_att_quote(i, start) {
 
 function check_att_value(i, start) {
     delimiter = context_stack[c_top]
-    if (d = index(delimiter, $i)) {
+    if (d = index($i, delimiter)) {
         val_len = d - 1
         val = substr($i, 1, val_len)
     } else {
@@ -260,7 +312,7 @@ function check_att_value(i, start) {
 
 # check for illegal '&' and ']]>' inside char data
 function check_text(i, start) {
-    if ((n = index("]]>", $i))) {
+    if ((n = index($i, "]]>"))) {
         error("CDATA end delimiter inside text", start + n - 1)
     }
     check_ref($i, start)
@@ -273,14 +325,14 @@ function check_ref(data, start) {
     start += length(arr[1]) + 1
     for (i = 2; i <= n; i++) {
         if (inv = invalid_ref(arr[i])) {
-            error("bad reference", start + inv - 1)
+            error("bad reference", start + inv - 2)
         }
         start += length(arr[i]) + 1
     }
 }
 
 function check_end_tag(i, start) {
-    tag = (n = index(">", $i)) ? substr($i, 1, n - 1) : $i
+    tag = (n = index($i, ">")) ? substr($i, 1, n - 1) : $i
     sub(/\s*$/, "", tag)
     pop_tag(0, tag, start)
     if (! n) { # inside the trailing space
@@ -292,7 +344,7 @@ function check_end_tag(i, start) {
 
 # end tag ::= </name\s*>, check for the \s* part
 function check_end_space(i, start) {
-    s = (n = index(">", $i)) ? substr($i, 1, n - 1) : $i
+    s = (n = index($i, ">")) ? substr($i, 1, n - 1) : $i
     if (match(s, /\S/)) {
         error("malformed end tag", start + RSTART - 1)
     }
@@ -305,7 +357,7 @@ function check_end_space(i, start) {
 
 # skip PI/prolog
 function skip_pi(i, start) {
-    if (! (n = index("?>", $i))) {
+    if (! (n = index($i, "?>"))) {
         return start + length($i) + 1
     }
     $i = substr($i, n + 2)
@@ -314,7 +366,7 @@ function skip_pi(i, start) {
 
 # skip DTD/CDATA
 function skip_dtd(i, start) {
-    if (! (n = index(">", $i))) {
+    if (! (n = index($i, ">"))) {
         return start + length($i) + 1
     }
     $i = substr($i, n + 1)
