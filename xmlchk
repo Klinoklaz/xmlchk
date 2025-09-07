@@ -2,21 +2,104 @@
 
 BEGIN {
     FS = "<"
+    original_record = ""
     # push when encounter a start tag,
     # pop when encounter an end tag
     t_top = 0
     tag_stack[t_top] = ""
+    tag_begin_at[t_top][1] = 0
     # track syntax structures that can cross multiple lines
     c_top = 0
     context_stack[c_top] = "d" # doc
+    context_begin_at[c_top][1] = 0
 }
 
 {
     # TODO:
 }
 
-function error(msg, pos) {
-    print msg " at line " NR ", char " pos > "/dev/stderr"
+# extract syntax structures from beginning of field `i` according to context,
+# check the syntax, then remove it from $i.
+# return a non-zero value indicates current char position in original $0
+function next_token(i, start) {
+    switch (context_stack[c_top]) {
+    case "c":
+        return check_comment(i, start)
+    case "s":
+        return check_start_tag(i, start)
+    case "a":
+        return check_att_list(i, start)
+    case "n":
+        return check_att_name(i, start)
+    case "=":
+        return check_att_equal(i, start)
+    case "q":
+        return check_att_quote(i, start)
+    case "'":
+    case "\"":
+        return check_att_value(i, start)
+    case "t":
+        return check_text(i, start)
+    case "e":
+        return check_end_tag(i, start)
+    case " ":
+        return check_end_space(i, start)
+    case "?":
+        return skip_pi(i, start)
+    case "!":
+        return skip_dtd(i, start)
+    case "d":
+        if (match($i, /\S/)) {
+            start += RSTART - 1
+            error("text outside the root element", start)
+        }
+        return start + length($i) + 1
+    }
+}
+
+# will be called inside the check functions,
+# essentially makes next_token() an indirect recursion
+function push_context(context, i, start, is_replace) {
+    if (! is_replace) {
+        c_top++
+    }
+    context_stack[c_top] = context
+    context_begin_at[c_top][1] = NR
+    context_begin_at[c_top][2] = start
+    return next_token(i, start)
+}
+
+# same as push_context()
+function pop_context(i, start) {
+    delete context_stack[c_top]
+    delete context_begin_at[c_top--]
+    return next_token(i, start)
+}
+
+function push_tag(tag, start) {
+    tag_stack[++t_top] = tag
+    tag_begin_at[t_top][1] = NR
+    tag_begin_at[t_top][2] = start
+}
+
+function pop_tag(no_check, tag, start) {
+    if (! no_check && t_top < 1) {
+        error("end tag doesn't match any start tag", start)
+    }
+    if (! no_check && tag != tag_stack[t_top]) {
+        error(sprintf("<%s> at line %d, char %d mismatch with </%s>",
+            tag_stack[t_top], tag_begin_at[t_top][1], tag_begin_at[t_top][2], tag), start)
+    }
+    delete tag_stack[t_top]
+    delete tag_begin_at[t_top--]
+}
+
+function error(msg, start) {
+    printf "%s: line %d, char %d: %s\n", FILENAME, NR, start, msg > "/dev/stderr"
+    printf "%s: line %d: %s\n",
+        FILENAME, NR, substr(original_record, start - 9, 20) > "/dev/stderr"
+    width = start < 10 ? start : 10
+    printf "%s: line %d: %"width"s\n", FILENAME, NR, "^" > "/dev/stderr"
     exit 1
 }
 
@@ -44,221 +127,196 @@ function invalid_ref(ref) {
     return match(ref, /[\x00-\x2C\x2F\x3A\x3C-\x40\x5B-\x5E\x60\x7B-\x7F].*?;/)
 }
 
-# detect comment end, check '--' inside comment,
-# then remove comment from field
 function check_comment(i, start) {
-    # not inside a comment
-    if (context_stack[c_top] != "c") {
-        return 0
+    # can't get out yet, continue with next field or line
+    if (! (n = index("--", $i))) {
+        return start + length($i) + 1
     }
-    # inside a comment
-    if ((n = index("--", $i)) == 0) {
-        return -1
+    cmt_end = index("-->", $i)
+    # note '---->' is invalid but '--->' is fine
+    if (! cmt_end || n < cmt_end - 1) {
+        error("illegal '--' inside comment", start + n - 1)
     }
-    m = index("-->", $i)
-    if (m == 0 || n < m) {
-        error("illegal '--' inside comment", n + start)
-    }
-    # end of a comment
-    $i = substr($i, m + 3)
-    delete context_stack[c_top--]
-    return m + 2 # trimmed length
+    $i = substr($i, cmt_end + 3)
+    return pop_context(i, start + cmt_end + 3)
 }
 
-# check end tag, 2 errors to be considered:
-# 1. mismatch with a start tag,
-# 2. the tag crossed multiple lines and one of them contains non-space
-function check_etag(i, line_start, start) {
-    if (context_stack[c_top] != "e") {
-        return 0
-    }
-    if (n = index(">", $i)) {
-        tag = substr($i, 1, n - 1)
-        $i = substr($i, n + 1)
-        delete context_stack[c_top--]
+function check_start_tag(i, start) {
+    # note empty-element tags end with '/>'
+    if (match($i, /\s|>|\/>/)) {
+        tag = substr($i, 1, RSTART - 1)
+        trim_len = RSTART
     } else {
         tag = $i
+        trim_len = length($i)
     }
-    gsub(/\s*$/, "", tag)
-    # line_start == is multi-line && not the initial line
-    if (line_start && tag != "") {
-        error("malformed end tag", start)
-    } else if (! line_start) {
-        if (t_top < 1) {
-            error("end tag doesn't match any start tag", start)
-        }
-        if (tag != tag_stack[t_top]) {
-            msg = sprintf("mismatch: <%s> </%s>", tag_stack[t_top], tag)
-            error(msg, start)
-        }
-        delete tag_stack[t_top--]
-    }
-    return n ? n : -1
-}
-
-# check start tag
-function check_stag(i, start) {
-    if (context_stack[c_top] != "s") {
-        return 0
-    }
-    # note empty-element tags end with '/>'
-    tag = match($i, /\s|>|\/>/) ? substr($i, 1, RSTART - 1) : $i
     if (tag == "") {
         error("malformed start tag", start)
     }
-    if (m = invalid_name(tag)) {
-        error("illegal character in tag name", start + m - 1)
+    if (inv = invalid_name(tag)) {
+        error("illegal character in tag name", start + inv - 1)
     }
-    tag_stack[++t_top] = tag
+    push_tag(tag, start)
+    $i = substr($i, trim_len + 1)
+    return push_context("a", i, start + trim_len, 1)
+}
 
-    # deal with attributes
-    trimmed = length(tag)
-    $i = substr($i, trimmed + 1)
-    while (n = match($i, /[^\s]/)) {
-        # consume token: trim leading space, check token, remove token from $i
-        trimmed += n - 1
-        $i = substr($i, n)
-        if (context_stack[c_top] == "s") {
-            # get out from current tag
-            if ($i ~ /^>/) {
-                context_stack[c_top] = "t"
-                $i = substr($i, 2)
-                return ++trimmed
-            }
-            if ($i ~ /^\/>/) {
-                delete context_stack[c_top--]
-                $i = substr($i, 3)
-                return trimmed + 2
-            }
-            # encountered attr name
-            context_stack[++c_top] = "a"
-        }
-        # extract attr name
-        if (context_stack[c_top] == "a") {
-            att_name = match($i, /[\s=]/) ? substr($i, 1, RSTART - 1) : $i
-            if (att_name == "") {
-                error("malformed attribute", start + trimmed)
-            }
-            if (m = invalid_name(att_name)) {
-                error("illegal character in attribute name", start + trimmed + m - 1)
-            }
-            t = length(att_name) + 1
-            trimmed += t
-            $i = substr($i, t + 1)
-            context_stack[c_top] = "l" # now at left side of '='
-        }
-        # wait for an '='
-        if (context_stack[c_top] == "l") {
-            if ($i !~ /^=/) {
-                error("expecting '=' after attribute name", start + trimmed)
-            }
-            trimmed++
-            $i = substr($i, 2)
-            context_stack[c_top] = "r" # now at right side of '='
-        }
-        # wait for a quote
-        if (context_stack[c_top] == "r") {
-            if ($i !~ /^["']/) {
-                error("unquoted attribute value", start + trimmed)
-            }
-            context_stack[c_top] = substr($i, 1, 1) # inside attr value
-            trimmed++
-            $i = substr($i, 2)
-        }
-        # extract attr value
-        if (context_stack[c_top] == "'" || context_stack[c_top] == "\"") {
-            delimiter = context_stack[c_top]
-            if (t = index(delimiter, $i)) {
-                val = substr($i, 1, t - 1)
-                delete context_stack[c_top--]
-            } else {
-                val = $i
-                t = length($i)
-            }
-            check_ref(val, start + trimmed)
-            trimmed += t
-            $i = substr($i, t + 1)
-            if ($i !~ /^(\s|>|\/>|$)/) {
-                error("attribute list not separated by space", start + trimmed)
-            }
-        }
+function check_att_list(i, start) {
+    # trim leading spaces
+    start += length($i)
+    sub(/^\s*/, "", $i)
+    start -= length($i)
+    if ($i == "") {
+        return start + 1
     }
-    return -1
+    # try to get out from current tag
+    if ($i ~ /^>/) {
+        $i = substr($i, 2)
+        return push_context("t", i, ++start, 1)
+    }
+    if ($i ~ /^\/>/) {
+        pop_tag(1)
+        $i = substr($i, 3)
+        return pop_context(i, start + 2)
+    }
+    # encounter attribute name
+    return push_context("n", i, start)
+}
+
+function check_att_name(i, start) {
+    # assume no leading space
+    if (match($i, /\s|=/)) {
+        att_name = substr($i, 1, RSTART - 1)
+        trim_len = RSTART
+    } else {
+        att_name = $i
+        trim_len = length($i)
+    }
+    if (att_name == "") {
+        error("malformed attribute", start)
+    }
+    if (inv = invalid_name(att_name)) {
+        error("illegal character in attribute name", start + inv - 1)
+    }
+    $i = substr($i, trim_len + 1)
+    # now at left side of '='
+    return push_context("=", i, start + trim_len, 1)
+}
+
+# wait for an '='
+function check_att_equal(i, start) {
+    start += length($i)
+    sub(/^\s*/, "", $i)
+    start -= length($i)
+    if ($i == "") {
+        return start + 1
+    }
+    if ($i !~ /^=/) {
+        error("expecting '=' after attribute name", start)
+    }
+    $i = substr($i, 2)
+    # now at right side of '='
+    return push_context("q", i, ++start, 1)
+}
+
+# wait for a quote
+function check_att_quote(i, start) {
+    start += length($i)
+    sub(/^\s*/, "", $i)
+    start -= length($i)
+    if ($i == "") {
+        return start + 1
+    }
+    if ($i !~ /^["']/) {
+        error("unquoted attribute value", start)
+    }
+    delimiter = substr($i, 1, 1)
+    $i = substr($i, 2)
+    # now inside attr value
+    return push_context(delimiter, i, ++start, 1)
+}
+
+function check_att_value(i, start) {
+    delimiter = context_stack[c_top]
+    if (d = index(delimiter, $i)) {
+        val_len = d - 1
+        val = substr($i, 1, val_len)
+    } else {
+        val = $i
+        val_len = length($i)
+    }
+    check_ref(val, start)
+    start += val_len + 1
+    if (! d) {
+        return start
+    }
+    # trim the value string and also the delimiter
+    $i = substr($i, val_len + 2)
+    if ($i !~ /^(\s|>|\/>|$)/) {
+        error("attribute list not separated by space", start)
+    }
+    return pop_context(i, start)
 }
 
 # check for illegal '&' and ']]>' inside char data
 function check_text(i, start) {
-    if (context_stack[c_top] != "t") {
-        return 0
-    }
     if ((n = index("]]>", $i))) {
         error("CDATA end delimiter inside text", start + n - 1)
     }
     check_ref($i, start)
-    return -1
+    return start + length($i) + 1
 }
 
 # check for invalid '&' in char data or attr value
 function check_ref(data, start) {
     n = split(data, arr, "&")
-    pos = length(arr[1])
+    start += length(arr[1]) + 1
     for (i = 2; i <= n; i++) {
-        if (m = invalid_ref(arr[i])) {
-            error("bad reference", start + pos + m - 1)
+        if (inv = invalid_ref(arr[i])) {
+            error("bad reference", start + inv - 1)
         }
-        pos += length(arr[i]) + 1
+        start += length(arr[i]) + 1
     }
+}
+
+function check_end_tag(i, start) {
+    tag = (n = index(">", $i)) ? substr($i, 1, n - 1) : $i
+    sub(/\s*$/, "", tag)
+    pop_tag(0, tag, start)
+    if (! n) { # inside the trailing space
+        return push_context(" ", i, start, 1)
+    }
+    $i = substr($i, n + 1)
+    return pop_context(i, start + n)
+}
+
+# end tag ::= </name\s*>, check for the \s* part
+function check_end_space(i, start) {
+    s = (n = index(">", $i)) ? substr($i, 1, n - 1) : $i
+    if (match(s, /\S/)) {
+        error("malformed end tag", start + RSTART - 1)
+    }
+    if (! n) {
+        return start + length($i) + 1
+    }
+    $i = substr($i, n + 1)
+    return pop_context(i, start + n)
 }
 
 # skip PI/prolog
-function skip_pi(i, line_start, start) {
-    if (context_stack[c_top] != "?") {
-        return 0
-    }
-    if (show_igr) {
-        if (start) {
-            printf "line %d, char %d: <%s", NR, start, $i
-        } else if (line_start) {
-            printf "line %d: %s", NR, $i
-        } else {
-            printf "<%s", $i
-        }
-    }
-    if ((n = index("?>", $i)) == 0) {
-        return -1
+function skip_pi(i, start) {
+    if (! (n = index("?>", $i))) {
+        return start + length($i) + 1
     }
     $i = substr($i, n + 2)
-    delete context_stack[c_top--]
-    return n + 1 # trimmed length
+    return pop_context(i, start + n + 1)
 }
 
 # skip DTD/CDATA
-function skip_dtd(i, line_start, start) {
-    # note that DTD can have comments in its interior
-    if (context_stack[c_top] != "!" || (! line_start && $i ~ /^!--/)) {
-        return 0
+function skip_dtd(i, start) {
+    if (! (n = index(">", $i))) {
+        return start + length($i) + 1
     }
-    if (show_igr) {
-        if (start) {
-            printf "line %d, char %d: <%s", NR, start, $i
-        } else if (line_start) {
-            printf "line %d: %s", NR, $i
-        } else {
-            printf "<%s", $i
-        }
-    }
-    if (! line_start) {
-        context_stack[++c_top] = "!"
-    }
-    # get out of DTD's nested sub-structures
-    skipped = 0
-    while ((n = index(">", $i)) && context_stack[c_top] == "!") {
-        skipped += n
-        $i = substr($i, n + 1)
-        delete context_stack[c_top--]
-    }
-    if (context_stack[c_top] == "!") {
-        return -1
-    }
-    return skipped # trimmed length
+    $i = substr($i, n + 1)
+    return pop_context(i, start + n)
 }
