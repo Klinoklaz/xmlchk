@@ -162,7 +162,8 @@ function invalid_name(name) {
     if (name ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/) {
         return 1
     }
-    return match(name, /[\x00-\x2C\x2F\x3A-\x40\x5B-\x5E\x60\x7B-\x7F]/)
+    # FIXME: 'ns:na:me' should be invalid, 'ns:name' should be valid
+    return match(name, /[\x00-\x2C\x2F\x3B-\x40\x5B-\x5E\x60\x7B-\x7F]/)
 }
 
 # find invald character in reference name.
@@ -173,10 +174,12 @@ function invalid_ref(ref) {
         return 0
     }
     # entity ref
-    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! index(ref, ";")) {
+    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! (n = index(ref, ";"))) {
         return 1
     }
-    return match(ref, /[\x00-\x2C\x2F\x3A\x3C-\x40\x5B-\x5E\x60\x7B-\x7F].*?;/)
+    # everything before first ';' is the name part
+    ref = substr(ref, 1, n - 1)
+    return match(ref, /[\x00-\x2C\x2F\x3A\x3C-\x40\x5B-\x5E\x60\x7B-\x7F]/)
 }
 
 function check_comment(i, start) {
@@ -321,11 +324,11 @@ function check_text(i, start) {
 
 # check for invalid '&' in char data or attr value
 function check_ref(data, start) {
-    n = split(data, arr, "&")
+    ref_cnt = split(data, arr, "&")
     start += length(arr[1]) + 1
-    for (i = 2; i <= n; i++) {
+    for (i = 2; i <= ref_cnt; i++) {
         if (inv = invalid_ref(arr[i])) {
-            error("bad reference", start + inv - 2)
+            error("bad reference", start + inv - 1)
         }
         start += length(arr[i]) + 1
     }
