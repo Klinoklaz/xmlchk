@@ -16,13 +16,10 @@ BEGIN {
 
 {
     original_record = $0
-    start = next_token(1, 1) # left side of '<'
+    start = next_token(1, 1) # left side of the delimiter '<'
 
-    for (j = 2; j <= NF; j++) {
+    for (i = 2; i <= NF; i++) { # WARNING: i is global
         ctx = context_stack[c_top]
-        # unknown bug: iteration index variable can be modified
-        # if passed directly to the following functions
-        i = j
         # '<' is a valid character in comment/PI,
         # so both can cross multiple fields
         if (ctx == "c" || ctx == "?") {
@@ -55,13 +52,11 @@ BEGIN {
             start = push_context("?", i, start + 1)
             continue
         case /^\//:
-            # check_end_tag() assumes leading '/' is trimmed
+            # check_end_tag() assumes leading '/' being trimmed
             $i = substr($i, 2)
             start = push_context("e", i, start + 1, 1)
             continue
         default:
-            # unknown bug: this can cause `i` being modified
-            # after the function returns (GNU Awk 5.2.1)
             start = push_context("s", i, start)
             continue
         }
@@ -148,10 +143,10 @@ function pop_tag(no_check, tag, start) {
 
 function error(msg, start) {
     printf "%s: line %d, char %d: %s\n", FILENAME, NR, start, msg > "/dev/stderr"
-    printf "%s: line %d: %s\n",
+    printf "%s: line %d:\t%s\n",
         FILENAME, NR, substr(original_record, start - 9, 20) > "/dev/stderr"
     width = start < 10 ? start : 10
-    printf "%s: line %d: %"width"s\n", FILENAME, NR, "^" > "/dev/stderr"
+    printf "%s: line %d:\t%"width"s\n", FILENAME, NR, "^" > "/dev/stderr"
     exit 1
 }
 
@@ -175,23 +170,23 @@ function invalid_ref(ref) {
         return 0
     }
     # entity ref
-    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! (n = index(ref, ";"))) {
+    if (ref ~ /^[\x00-\x40\x5B-\x5E\x60\x7B-\x7F]/ || ! (semi = index(ref, ";"))) {
         return 1
     }
     # everything before first ';' is the name part
-    ref = substr(ref, 1, n - 1)
+    ref = substr(ref, 1, semi - 1)
     return match(ref, /[\x00-\x2C\x2F\x3A\x3C-\x40\x5B-\x5E\x60\x7B-\x7F]/)
 }
 
 function check_comment(i, start) {
     # can't get out yet, continue with next field or line
-    if (! (n = index($i, "--"))) {
+    if (! (dash = index($i, "--"))) {
         return start + length($i) + 1
     }
     cmt_end = index($i, "-->")
     # note '---->' is invalid but '--->' is fine
-    if (! cmt_end || n < cmt_end - 1) {
-        error("illegal '--' inside comment", start + n - 1)
+    if (! cmt_end || dash < cmt_end - 1) {
+        error("illegal '--' inside comment", start + dash - 1)
     }
     $i = substr($i, cmt_end + 3)
     return pop_context(i, start + cmt_end + 3)
@@ -200,19 +195,19 @@ function check_comment(i, start) {
 function check_start_tag(i, start) {
     # note empty-element tags end with '/>'
     if (match($i, /\s|>|\/>/)) {
-        tag = substr($i, 1, RSTART - 1)
+        stag = substr($i, 1, RSTART - 1)
         trim_len = RSTART - 1
     } else {
-        tag = $i
+        stag = $i
         trim_len = length($i)
     }
-    if (tag == "") {
+    if (stag == "") {
         error("malformed start tag", start)
     }
-    if (inv = invalid_name(tag)) {
+    if (inv = invalid_name(stag)) {
         error("illegal character in tag name", start + inv - 1)
     }
-    push_tag(tag, start)
+    push_tag(stag, start)
     $i = substr($i, trim_len + 1)
     return push_context("a", i, start + trim_len, 1)
 }
@@ -316,8 +311,8 @@ function check_att_value(i, start) {
 
 # check for illegal '&' and ']]>' inside char data
 function check_text(i, start) {
-    if ((n = index($i, "]]>"))) {
-        error("CDATA end delimiter inside text", start + n - 1)
+    if ((cd = index($i, "]]>"))) {
+        error("CDATA end delimiter inside text", start + cd - 1)
     }
     check_ref($i, start)
     return start + length($i) + 1
@@ -327,52 +322,60 @@ function check_text(i, start) {
 function check_ref(data, start) {
     ref_cnt = split(data, arr, "&")
     start += length(arr[1]) + 1
-    for (i = 2; i <= ref_cnt; i++) {
-        if (inv = invalid_ref(arr[i])) {
+    # WARNING: don't use the global i as iteration index
+    for (j = 2; j <= ref_cnt; j++) {
+        if (inv = invalid_ref(arr[j])) {
             error("bad reference", start + inv - 1)
         }
-        start += length(arr[i]) + 1
+        start += length(arr[j]) + 1
     }
 }
 
 function check_end_tag(i, start) {
-    tag = (n = index($i, ">")) ? substr($i, 1, n - 1) : $i
+    tag = (gt_sign = index($i, ">")) \
+        ? substr($i, 1, gt_sign - 1) \
+        : $i
     sub(/\s*$/, "", tag)
     pop_tag(0, tag, start)
-    if (! n) { # inside the trailing space
-        return push_context(" ", i, start, 1)
+    if (gt_sign) {
+        $i = substr($i, gt_sign + 1)
+        return pop_context(i, start + gt_sign)
     }
-    $i = substr($i, n + 1)
-    return pop_context(i, start + n)
+    # inside the trailing space
+    start += length($i) + 1
+    $i = ""
+    return push_context(" ", i, start, 1)
 }
 
 # end tag ::= </name\s*>, check for the \s* part
 function check_end_space(i, start) {
-    s = (n = index($i, ">")) ? substr($i, 1, n - 1) : $i
-    if (match(s, /\S/)) {
+    end_space = (tag_end = index($i, ">")) \
+        ? substr($i, 1, tag_end - 1) \
+        : $i
+    if (match(end_space, /\S/)) {
         error("malformed end tag", start + RSTART - 1)
     }
-    if (! n) {
+    if (! tag_end) {
         return start + length($i) + 1
     }
-    $i = substr($i, n + 1)
-    return pop_context(i, start + n)
+    $i = substr($i, tag_end + 1)
+    return pop_context(i, start + tag_end)
 }
 
 # skip PI/prolog
 function skip_pi(i, start) {
-    if (! (n = index($i, "?>"))) {
+    if (! (pi_end = index($i, "?>"))) {
         return start + length($i) + 1
     }
-    $i = substr($i, n + 2)
-    return pop_context(i, start + n + 1)
+    $i = substr($i, pi_end + 2)
+    return pop_context(i, start + pi_end + 1)
 }
 
 # skip DTD/CDATA
 function skip_dtd(i, start) {
-    if (! (n = index($i, ">"))) {
+    if (! (dtd_end = index($i, ">"))) {
         return start + length($i) + 1
     }
-    $i = substr($i, n + 1)
-    return pop_context(i, start + n)
+    $i = substr($i, dtd_end + 1)
+    return pop_context(i, start + dtd_end)
 }
