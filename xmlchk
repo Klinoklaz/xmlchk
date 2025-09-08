@@ -1,6 +1,7 @@
 #!/usr/bin/env -S gawk -f
 
 # copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
+# published under MIT license
 
 # xmlchk v0.0.1
 # XML syntax validator, requires gawk version >= 4.0
