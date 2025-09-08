@@ -1,5 +1,10 @@
 #!/usr/bin/env -S gawk -f
 
+# copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
+
+# xmlchk v0.0.1
+# XML syntax validator, requires gawk version >= 4.0
+
 BEGIN {
     FS = "<"
     original_record = ""
@@ -33,7 +38,7 @@ BEGIN {
             continue
         }
         # now at right side of the delimiter '<'
-        if (ctx != "t" && ctx != "d") {
+        if (ctx != "t" && ctx != "d" && ctx != "!") {
             error("unexpected '<' inside another tag", start - 1)
         }
         switch ($i) {
@@ -60,6 +65,25 @@ BEGIN {
             start = push_context("s", i, start)
             continue
         }
+    }
+}
+
+END	{
+    if (t_top) {
+        error(sprintf("unexpected EOF, element not closed by end tag " \
+            "(started at line %d, char %d: <%s>)",
+            tag_begin_at[t_top][1], tag_begin_at[t_top][2], tag_stack[t_top]), start)
+    }
+    if (c_top) {
+        begin_at = context_begin_at[c_top][2]
+        ctx = context_stack[c_top]
+        # calc the position of '<'
+        begin_at = ctx == "c" \
+            ? begin_at - 4 \
+            : (ctx == "?" || ctx == "e" ? begin_at - 2 : begin_at - 1)
+        error(sprintf("unexpected EOF, syntax structure not closed " \
+            "(started at line %d, char %d)",
+            context_begin_at[c_top][1], begin_at), start)
     }
 }
 
@@ -111,7 +135,7 @@ function push_context(context, i, start, is_replace) {
         c_top++
     }
     context_stack[c_top] = context
-    context_begin_at[c_top][1] = NR
+    context_begin_at[c_top][1] = FNR
     context_begin_at[c_top][2] = start
     return next_token(i, start)
 }
@@ -125,7 +149,7 @@ function pop_context(i, start) {
 
 function push_tag(tag, start) {
     tag_stack[++t_top] = tag
-    tag_begin_at[t_top][1] = NR
+    tag_begin_at[t_top][1] = FNR
     tag_begin_at[t_top][2] = start - 1 # position of '<'
 }
 
@@ -142,11 +166,12 @@ function pop_tag(no_check, tag, start) {
 }
 
 function error(msg, start) {
-    printf "%s: line %d, char %d: %s\n", FILENAME, NR, start, msg > "/dev/stderr"
+    printf "%s: line %d, char %d: %s\n", FILENAME, FNR, start, msg > "/dev/stderr"
     printf "%s: line %d:\t%s\n",
-        FILENAME, NR, substr(original_record, start - 9, 20) > "/dev/stderr"
+        FILENAME, FNR, substr(original_record, start - 9, 20) > "/dev/stderr"
     width = start < 10 ? start : 10
-    printf "%s: line %d:\t%"width"s\n", FILENAME, NR, "^" > "/dev/stderr"
+    printf "%s: line %d:\t%"width"s\n", FILENAME, FNR, "^" > "/dev/stderr"
+    c_top = t_top = 0 # skip the END block
     exit 1
 }
 
