@@ -3,7 +3,7 @@
 # copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
 # published under MIT license
 
-# xmlchk v0.1.0
+# xmlchk v0.1.1
 # XML syntax validator, requires gawk version >= 4.0
 
 BEGIN {
@@ -347,14 +347,14 @@ function check_text(i, start) {
 
 # check for invalid '&' in char data or attr value
 function check_ref(data, start) {
-    ref_cnt = split(data, arr, "&")
-    start += length(arr[1]) + 1
-    # WARNING: don't use the global i as iteration index
-    for (j = 2; j <= ref_cnt; j++) {
-        if (inv = invalid_ref(arr[j])) {
+    split(data, ref_arr, "&")
+    start += length(ref_arr[1]) + 1
+    delete ref_arr[1]
+    for (k in ref_arr) {
+        if (inv = invalid_ref(ref_arr[k])) {
             error("bad reference", start + inv - 1)
         }
-        start += length(arr[j]) + 1
+        start += length(ref_arr[k]) + 1
     }
 }
 
