@@ -3,7 +3,7 @@
 # copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
 # published under MIT license
 
-# xmlchk v0.1.1
+# xmlchk v0.1.2
 # XML syntax validator, requires gawk version >= 4.0
 
 BEGIN {
@@ -52,7 +52,7 @@ BEGIN {
         case /^!/:
             start = push_context("!", i, start)
             continue
-        case /^?/:
+        case /^\?/:
             # same logic as '!--'
             $i = substr($i, 2)
             start = push_context("?", i, start + 1)
@@ -69,7 +69,7 @@ BEGIN {
     }
 }
 
-END	{
+ENDFILE	{
     if (t_top) {
         error(sprintf("unexpected EOF, element not closed by end tag " \
             "(started at line %d, char %d: <%s>)",
@@ -391,7 +391,7 @@ function check_end_space(i, start) {
 
 function check_pi_target(i, start) {
     # assume the leading '<?' already trimmed
-    if (match($i, /\s|?>/)) {
+    if (match($i, /\s|\?>/)) {
         pi_sep = RSTART
         pi_target = substr($i, 1, pi_sep - 1)
     } else {
@@ -403,14 +403,14 @@ function check_pi_target(i, start) {
     }
     # TODO: full XML declaration syntax check
     if (pi_target == "xml" && (FNR != 1 || start != 3)) {
-        error("XML declaration at wrong position", start - 2)
+        error("XML declaration at wrong place", start - 2)
     }
     if (inv = invalid_name(pi_target)) {
         error("illegal character in PI target", start + inv - 1)
     }
     start += pi_sep - 1
     $i = substr($i, pi_sep)
-    if ($i ~ /^?>/) {
+    if ($i ~ /^\?>/) {
         $i = substr($i, 3)
         return pop_context(i, start + 2)
     }
