@@ -3,7 +3,7 @@
 # copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
 # published under MIT license
 
-# xmlchk v0.0.1
+# xmlchk v0.1.0
 # XML syntax validator, requires gawk version >= 4.0
 
 BEGIN {
@@ -28,7 +28,7 @@ BEGIN {
         ctx = context_stack[c_top]
         # '<' is a valid character in comment/PI,
         # so both can cross multiple fields
-        if (ctx == "c" || ctx == "?") {
+        if (ctx == "c" || ctx == "i") {
             start = next_token(i, start)
             continue
         }
@@ -115,7 +115,9 @@ function next_token(i, start) {
     case " ":
         return check_end_space(i, start)
     case "?":
-        return skip_pi(i, start)
+        return check_pi_target(i, start)
+    case "i":
+        return check_pi_end(i, start)
     case "!":
         return skip_dtd(i, start)
     case "d":
@@ -314,9 +316,8 @@ function check_att_quote(i, start) {
 }
 
 function check_att_value(i, start) {
-    delimiter = context_stack[c_top]
-    if (d = index($i, delimiter)) {
-        val_len = d - 1
+    if (quote = index($i, context_stack[c_top])) {
+        val_len = quote - 1
         val = substr($i, 1, val_len)
     } else {
         val = $i
@@ -324,7 +325,7 @@ function check_att_value(i, start) {
     }
     check_ref(val, start)
     start += val_len + 1
-    if (! d) {
+    if (! quote) {
         return start
     }
     # trim the value string and also the delimiter
@@ -388,8 +389,42 @@ function check_end_space(i, start) {
     return pop_context(i, start + tag_end)
 }
 
-# skip PI/prolog
-function skip_pi(i, start) {
+function check_pi_target(i, start) {
+    # assume the leading '<?' already trimmed
+    if (match($i, /\s|?>/)) {
+        pi_sep = RSTART
+        pi_target = substr($i, 1, pi_sep - 1)
+    } else {
+        pi_sep = length($i) + 1
+        pi_target = $i
+    }
+    if (pi_target == "") {
+        error("malformed PI target", start)
+    }
+    # TODO: full XML declaration syntax check
+    if (pi_target == "xml" && (FNR != 1 || start != 3)) {
+        error("XML declaration at wrong position", start - 2)
+    }
+    if (inv = invalid_name(pi_target)) {
+        error("illegal character in PI target", start + inv - 1)
+    }
+    start += pi_sep - 1
+    $i = substr($i, pi_sep)
+    if ($i ~ /^?>/) {
+        $i = substr($i, 3)
+        return pop_context(i, start + 2)
+    }
+    # this detects the second '<' in '<?tar<get'
+    if ($i == "" && NF > i) {
+        error("illegal character in PI target", start)
+    }
+    # now inside the instruction part
+    return push_context("i", i, start, 1)
+}
+
+# everything is valid in this part of PI, nothing to check,
+# just wait for '?>'
+function check_pi_end(i, start) {
     if (! (pi_end = index($i, "?>"))) {
         return start + length($i) + 1
     }
