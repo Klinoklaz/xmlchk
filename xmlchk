@@ -3,20 +3,38 @@
 # copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
 # published under MIT license
 
-# xmlchk v0.1.2
+# xmlchk v0.1.3
 # XML syntax validator, requires gawk version >= 4.0
 
 BEGIN {
+    # context codes
+    C_COMMENT = "c"
+    C_START_TAG = "s"
+    C_ATT_LIST = "a"
+    C_ATT_NAME = "n"
+    C_ATT_EQ = "="
+    C_ATT_QUOTE = "q"
+    C_ATT_VALUE = "\""
+    C_ATT_VALUE_ = "'"
+    C_TEXT = "t"
+    C_END_TAG = "e"
+    C_END_SPACE = " "
+    C_PI_TARGET = "?"
+    C_PI_BODY = "i"
+    C_DTD = "!"
+    C_DOCUMENT = "d"
+
     FS = "<"
+    unique_attr[1] = 0 # attr name duplication detector
     original_record = ""
     # push when encounter a start tag,
     # pop when encounter an end tag
     t_top = 0
     tag_stack[t_top] = ""
     tag_begin_at[t_top][1] = 0
-    # track syntax structures that can cross multiple lines
+    # track parsing context
     c_top = 0
-    context_stack[c_top] = "d" # doc
+    context_stack[c_top] = C_DOCUMENT
     context_begin_at[c_top][1] = 0
 }
 
@@ -28,18 +46,18 @@ BEGIN {
         ctx = context_stack[c_top]
         # '<' is a valid character in comment/PI,
         # so both can cross multiple fields
-        if (ctx == "c" || ctx == "i") {
+        if (ctx == C_COMMENT || ctx == C_PI_BODY) {
             start = next_token(i, start)
             continue
         }
         # DTD can have comments in its interior,
         # if it's not a comment, then assume it's DTD subset
-        if (ctx == "!" && $i !~ /^!--/) {
-            start = push_context("!", i, start)
+        if (ctx == C_DTD && $i !~ /^!--/) {
+            start = push_context(C_DTD, i, start)
             continue
         }
         # now at right side of the delimiter '<'
-        if (ctx != "t" && ctx != "d" && ctx != "!") {
+        if (ctx != C_TEXT && ctx != C_DOCUMENT && ctx != C_DTD) {
             error("unexpected '<' inside another tag", start - 1)
         }
         switch ($i) {
@@ -47,23 +65,23 @@ BEGIN {
             # trim leading '!--'
             # to avoid interfering with check_comment()
             $i = substr($i, 4)
-            start = push_context("c", i, start + 3)
+            start = push_context(C_COMMENT, i, start + 3)
             continue
         case /^!/:
-            start = push_context("!", i, start)
+            start = push_context(C_DTD, i, start)
             continue
         case /^\?/:
             # same logic as '!--'
             $i = substr($i, 2)
-            start = push_context("?", i, start + 1)
+            start = push_context(C_PI_TARGET, i, start + 1)
             continue
         case /^\//:
             # check_end_tag() assumes leading '/' being trimmed
             $i = substr($i, 2)
-            start = push_context("e", i, start + 1, 1)
+            start = push_context(C_END_TAG, i, start + 1, 1)
             continue
         default:
-            start = push_context("s", i, start)
+            start = push_context(C_START_TAG, i, start)
             continue
         }
     }
@@ -79,9 +97,9 @@ ENDFILE	{
         begin_at = context_begin_at[c_top][2]
         ctx = context_stack[c_top]
         # calc the position of '<'
-        begin_at = ctx == "c" \
+        begin_at = ctx == C_COMMENT \
             ? begin_at - 4 \
-            : (ctx == "?" || ctx == "e" ? begin_at - 2 : begin_at - 1)
+            : (ctx == C_PI_TARGET || ctx == C_END_TAG ? begin_at - 2 : begin_at - 1)
         error(sprintf("unexpected EOF, syntax structure not closed " \
             "(started at line %d, char %d)",
             context_begin_at[c_top][1], begin_at), start)
@@ -93,34 +111,34 @@ ENDFILE	{
 # return a non-zero value indicates current char position in original $0
 function next_token(i, start) {
     switch (context_stack[c_top]) {
-    case "c":
+    case "c": # C_COMMENT
         return check_comment(i, start)
-    case "s":
+    case "s": # C_START_TAG
         return check_start_tag(i, start)
-    case "a":
+    case "a": # C_ATT_LIST
         return check_att_list(i, start)
-    case "n":
+    case "n": # C_ATT_NAME
         return check_att_name(i, start)
-    case "=":
+    case "=": # C_ATT_EQ
         return check_att_equal(i, start)
-    case "q":
+    case "q": # C_ATT_QUOTE
         return check_att_quote(i, start)
-    case "'":
-    case "\"":
+    case "'": # C_ATT_VALUE_
+    case "\"": # C_ATT_VALUE
         return check_att_value(i, start)
-    case "t":
+    case "t": # C_TEXT
         return check_text(i, start)
-    case "e":
+    case "e": # C_END_TAG
         return check_end_tag(i, start)
-    case " ":
+    case " ": # C_END_SPACE
         return check_end_space(i, start)
-    case "?":
+    case "?": # C_PI_TARGET
         return check_pi_target(i, start)
-    case "i":
-        return check_pi_end(i, start)
-    case "!":
+    case "i": # C_PI_BODY
+        return check_pi_body(i, start)
+    case "!": # C_DTD
         return skip_dtd(i, start)
-    case "d":
+    case "d": # C_DOCUMENT
         if (match($i, /\S/)) {
             start += RSTART - 1
             error("text outside the root element", start)
@@ -174,7 +192,7 @@ function error(msg, start) {
         FILENAME, FNR, substr(original_record, start - 9, 20) > "/dev/stderr"
     width = start < 10 ? start : 10
     printf "%s: line %d:\t%"width"s\n", FILENAME, FNR, "^" > "/dev/stderr"
-    c_top = t_top = 0 # skip the END block
+    c_top = t_top = 0 # skip the ENDFILE block
     exit 1
 }
 
@@ -220,26 +238,29 @@ function check_comment(i, start) {
     return pop_context(i, start + cmt_end + 3)
 }
 
+# start tag ::= '<name(\s+attribute)*>'
+# this checks the '<name' part
 function check_start_tag(i, start) {
     # note empty-element tags end with '/>'
     if (match($i, /\s|>|\/>/)) {
-        stag = substr($i, 1, RSTART - 1)
-        trim_len = RSTART - 1
+        start_tag = substr($i, 1, RSTART - 1)
+        tag_len = RSTART - 1
     } else {
-        stag = $i
-        trim_len = length($i)
+        start_tag = $i
+        tag_len = length($i)
     }
-    if (stag == "") {
+    if (start_tag == "") {
         error("malformed start tag", start)
     }
-    if (inv = invalid_name(stag)) {
+    if (inv = invalid_name(start_tag)) {
         error("illegal character in tag name", start + inv - 1)
     }
-    push_tag(stag, start)
-    $i = substr($i, trim_len + 1)
-    return push_context("a", i, start + trim_len, 1)
+    push_tag(start_tag, start)
+    $i = substr($i, tag_len + 1)
+    return push_context(C_ATT_LIST, i, start + tag_len, 1)
 }
 
+# this checks the '(\s+attribute)*>' part of start tag
 function check_att_list(i, start) {
     # trim leading spaces
     start += length($i)
@@ -249,17 +270,19 @@ function check_att_list(i, start) {
         return start + 1
     }
     # try to get out from current tag
-    if ($i ~ /^>/) {
+    if (substr($i, 1, 1) == ">") {
         $i = substr($i, 2)
-        return push_context("t", i, ++start, 1)
+        delete unique_attr
+        return push_context(C_TEXT, i, ++start, 1)
     }
-    if ($i ~ /^\/>/) {
+    if (substr($i, 1, 2) == "/>") {
         pop_tag(1)
         $i = substr($i, 3)
+        delete unique_attr
         return pop_context(i, start + 2)
     }
     # encounter attribute name
-    return push_context("n", i, start)
+    return push_context(C_ATT_NAME, i, start)
 }
 
 function check_att_name(i, start) {
@@ -277,9 +300,13 @@ function check_att_name(i, start) {
     if (inv = invalid_name(att_name)) {
         error("illegal character in attribute name", start + inv - 1)
     }
+    if (unique_attr[att_name]) {
+        error("duplicated attribute name", start)
+    }
+    unique_attr[att_name] = 1
     $i = substr($i, trim_len + 1)
     # now at left side of '='
-    return push_context("=", i, start + trim_len, 1)
+    return push_context(C_ATT_EQ, i, start + trim_len, 1)
 }
 
 # wait for an '='
@@ -290,12 +317,12 @@ function check_att_equal(i, start) {
     if ($i == "") {
         return start + 1
     }
-    if ($i !~ /^=/) {
+    if (substr($i, 1, 1) != "=") {
         error("expecting '=' after attribute name", start)
     }
     $i = substr($i, 2)
     # now at right side of '='
-    return push_context("q", i, ++start, 1)
+    return push_context(C_ATT_QUOTE, i, ++start, 1)
 }
 
 # wait for a quote
@@ -306,10 +333,10 @@ function check_att_quote(i, start) {
     if ($i == "") {
         return start + 1
     }
-    if ($i !~ /^["']/) {
+    delimiter = substr($i, 1, 1)
+    if (delimiter != C_ATT_VALUE && delimiter != C_ATT_VALUE_) {
         error("unquoted attribute value", start)
     }
-    delimiter = substr($i, 1, 1)
     $i = substr($i, 2)
     # now inside attr value
     return push_context(delimiter, i, ++start, 1)
@@ -328,7 +355,7 @@ function check_att_value(i, start) {
     if (! quote) {
         return start
     }
-    # trim the value string and also the delimiter
+    # trim the value string and also the quote
     $i = substr($i, val_len + 2)
     if ($i !~ /^(\s|>|\/>|$)/) {
         error("attribute list not separated by space", start)
@@ -371,7 +398,7 @@ function check_end_tag(i, start) {
     # inside the trailing space
     start += length($i) + 1
     $i = ""
-    return push_context(" ", i, start, 1)
+    return push_context(C_END_SPACE, i, start, 1)
 }
 
 # end tag ::= </name\s*>, check for the \s* part
@@ -399,7 +426,7 @@ function check_pi_target(i, start) {
         pi_target = $i
     }
     if (pi_target == "") {
-        error("malformed PI target", start)
+        error("malformed PI", start)
     }
     # TODO: full XML declaration syntax check
     if (pi_target == "xml" && (FNR != 1 || start != 3)) {
@@ -410,7 +437,7 @@ function check_pi_target(i, start) {
     }
     start += pi_sep - 1
     $i = substr($i, pi_sep)
-    if ($i ~ /^\?>/) {
+    if (substr($i, 1, 2) == "?>") {
         $i = substr($i, 3)
         return pop_context(i, start + 2)
     }
@@ -419,12 +446,12 @@ function check_pi_target(i, start) {
         error("illegal character in PI target", start)
     }
     # now inside the instruction part
-    return push_context("i", i, start, 1)
+    return push_context(C_PI_BODY, i, start, 1)
 }
 
-# everything is valid in this part of PI, nothing to check,
-# just wait for '?>'
-function check_pi_end(i, start) {
+# everything is valid in the remaining part of PI,
+# nothing to really check, just wait for '?>'
+function check_pi_body(i, start) {
     if (! (pi_end = index($i, "?>"))) {
         return start + length($i) + 1
     }
