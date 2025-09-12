@@ -3,7 +3,7 @@
 # copyright (c) 2025 klinoklaz infentrilnuk@yandex.com
 # published under MIT license
 
-# xmlchk v0.1.3
+# xmlchk v0.1.4
 # XML syntax validator, requires gawk version >= 4.0
 
 BEGIN {
@@ -26,6 +26,7 @@ BEGIN {
 
     FS = "<"
     unique_attr[1] = 0 # attr name duplication detector
+    end_of_root = 0 # multi-root detector
     original_record = ""
     # push when encounter a start tag,
     # pop when encounter an end tag
@@ -42,7 +43,7 @@ BEGIN {
     original_record = $0
     start = next_token(1, 1) # left side of the delimiter '<'
 
-    for (i = 2; i <= NF; i++) { # WARNING: i is global
+    for (i = 2; i <= NF; i++) { # WARNING: i is global, don't ever reuse
         ctx = context_stack[c_top]
         # '<' is a valid character in comment/PI,
         # so both can cross multiple fields
@@ -60,6 +61,7 @@ BEGIN {
         if (ctx != C_TEXT && ctx != C_DOCUMENT && ctx != C_DTD) {
             error("unexpected '<' inside another tag", start - 1)
         }
+
         switch ($i) {
         case /^!--/:
             # trim leading '!--'
@@ -178,6 +180,9 @@ function pop_tag(no_check, tag, start) {
     if (! no_check && t_top < 1) {
         error("end tag doesn't match any start tag", start)
     }
+    if (t_top == 1) {
+        end_of_root = 1
+    }
     if (! no_check && tag != tag_stack[t_top]) {
         error(sprintf("<%s> at line %d, char %d mismatches with </%s>",
             tag_stack[t_top], tag_begin_at[t_top][1], tag_begin_at[t_top][2], tag), start)
@@ -241,6 +246,9 @@ function check_comment(i, start) {
 # start tag ::= '<name(\s+attribute)*>'
 # this checks the '<name' part
 function check_start_tag(i, start) {
+    if (end_of_root) {
+        error("start tag outside the root element", start - 1)
+    }
     # note empty-element tags end with '/>'
     if (match($i, /\s|>|\/>/)) {
         start_tag = substr($i, 1, RSTART - 1)
@@ -289,10 +297,10 @@ function check_att_name(i, start) {
     # assume no leading space
     if (match($i, /\s|=/)) {
         att_name = substr($i, 1, RSTART - 1)
-        trim_len = RSTART - 1
+        att_len = RSTART - 1
     } else {
         att_name = $i
-        trim_len = length($i)
+        att_len = length($i)
     }
     if (att_name == "") {
         error("malformed attribute", start)
@@ -304,9 +312,9 @@ function check_att_name(i, start) {
         error("duplicated attribute name", start)
     }
     unique_attr[att_name] = 1
-    $i = substr($i, trim_len + 1)
+    $i = substr($i, att_len + 1)
     # now at left side of '='
-    return push_context(C_ATT_EQ, i, start + trim_len, 1)
+    return push_context(C_ATT_EQ, i, start + att_len, 1)
 }
 
 # wait for an '='
