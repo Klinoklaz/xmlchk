@@ -195,8 +195,8 @@ function error(msg, start) {
     printf "%s: line %d, char %d: %s\n", FILENAME, FNR, start, msg > "/dev/stderr"
     printf "%s: line %d:\t%s\n",
         FILENAME, FNR, substr(original_record, start - 9, 20) > "/dev/stderr"
-    width = start < 10 ? start : 10
-    printf "%s: line %d:\t%"width"s\n", FILENAME, FNR, "^" > "/dev/stderr"
+    printf "%s: line %d:\t%*s\n",
+        FILENAME, FNR, (start < 10 ? start : 10), "^" > "/dev/stderr"
     c_top = t_top = 0 # skip the ENDFILE block
     exit 1
 }
