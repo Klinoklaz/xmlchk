@@ -14,7 +14,7 @@ XML syntax validator written in AWK, suitable for quick check on very large file
 ## Limitations
 * DTD/CDATA/Schema validation not implemented
 * Doesn't report undefined namespaces
-* Doesn't report invalid unicode characters
+* Doesn't report invalid multi-byte characters
 
 ## Links
-* https://www.w3.org/TR/xml/
+* [XML specification](https://www.w3.org/TR/xml/)
